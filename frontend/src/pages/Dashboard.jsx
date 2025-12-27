@@ -6,6 +6,7 @@ import apiClient from '../api/apiClient';
 export default function Dashboard() {
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
+  
 
   const handleDiagnose = async (formData) => {
     setLoading(true);
