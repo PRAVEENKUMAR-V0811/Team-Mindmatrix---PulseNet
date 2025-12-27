@@ -11,7 +11,11 @@ load_dotenv()
 
 # Configure Gemini with your FREE Key
 # In a production environment, use environment variables
-GENAI_API_KEY = "YOUR_API_Key" 
+GENAI_API_KEY = os.getenv("GENAI_API_KEY")
+
+if not GENAI_API_KEY:
+    raise RuntimeError("GENAI_API_KEY not found in .env file")
+
 genai.configure(api_key=GENAI_API_KEY)
 print("Checking available models...")
 for m in genai.list_models():
