@@ -1,89 +1,120 @@
 import os
 import json
-import google.generativeai as genai
-from fastapi import FastAPI, HTTPException
+import datetime
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional
-from dotenv import load_dotenv
-
-load_dotenv()
-
-# Configure Gemini with your FREE Key
-# In a production environment, use environment variables
-GENAI_API_KEY = os.getenv("GENAI_API_KEY")
-
-if not GENAI_API_KEY:
-    raise RuntimeError("GENAI_API_KEY not found in .env file")
-
-genai.configure(api_key=GENAI_API_KEY)
-print("Checking available models...")
-for m in genai.list_models():
-    if 'generateContent' in m.supported_generation_methods:
-        print(f"Available: {m.name}")
-model = genai.GenerativeModel('gemini-flash-latest')
+import google.generativeai as genai
+from database import records_collection
+from models import DiagnosisRequest, ChatRequest 
 
 app = FastAPI()
 
-# Allow your React app to talk to this backend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS for React
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# --- Data Models (Matching your Zustand Store) ---
-
-class Vitals(BaseModel):
-    temp: str
-    bp: str
-    hr: str
-    spo2: Optional[str] = ""
-
-class DiagnosisRequest(BaseModel):
-    name: str
-    age: str
-    gender: str
-    weight: str
-    vitals: Vitals
-    symptoms: str
-
-class ChatRequest(BaseModel):
-    message: str
-    language: str
-
-# --- 1. Diagnosis Endpoint ---
+# Gemini Config
+genai.configure(api_key=os.getenv("GENAI_API_KEY"))
+# Note: Ensure the model name is 'gemini-1.5-flash-latest' for best results
+model = genai.GenerativeModel('gemini-flash-latest')
 
 @app.post("/api/analyze")
 async def analyze_symptoms(data: DiagnosisRequest):
+    print(f"Received request for: {data.patient.name}")
+    
+    # We use f-string for variables, but DOUBLE the curly braces for the literal JSON part
     prompt = f"""
-    You are a Medical AI Assistant for rural healthcare. 
-    Analyze the following patient data:
-    Patient: {data.name}, Age: {data.age}, Gender: {data.gender}, Weight: {data.weight}kg.
-    Vitals: Temp {data.vitals.temp}F, BP {data.vitals.bp}, Heart Rate {data.vitals.hr}bpm.
-    Symptoms: {data.symptoms}
+You are a Clinical Decision Support Medical AI assisting licensed physicians.
+All medication dosages MUST be adjusted based on patient age category and safety standards.
 
-    Return a JSON response (strictly follow this structure):
+PATIENT DETAILS:
+Name: {data.patient.name}
+Age: {data.patient.age}
+Gender: {data.patient.gender}
+
+AGE CATEGORIZATION (MANDATORY):
+- Infant (0–1 years)
+- Child (2–12 years)
+- Adolescent (13–17 years)
+- Adult (18–59 years)
+- Geriatric (60+ years)
+
+VITAL SIGNS:
+Temperature: {data.vitals.temperature} °C
+Blood Pressure: {data.vitals.bp.systolic}/{data.vitals.bp.diastolic} mmHg
+Pulse Rate: {data.vitals.pulse} bpm
+
+SYMPTOMS:
+{data.symptoms}
+
+OUTPUT FORMAT:
+Return ONLY valid JSON in the structure below. Do not include markdown or conversational text.
+
+{{
+  "ageCategory": "",
+  "diagnosis": "",
+  "confidence": "",
+  "referralNeeded": true,
+  "treatments": [
     {{
-        "diagnosis": "Name of possible condition",
-        "confidence": 85,
-        "referralNeeded": true/false,
-        "treatments": ["step 1", "step 2", "step 3"]
+      "medication": "",
+      "dosage": "",
+      "route": "",
+      "frequency": "",
+      "duration": "",
+      "ageSpecificRationale": ""
     }}
-    Important: If symptoms are severe, set referralNeeded to true.
-    """
+  ],
+  "drugInteractions": [
+    {{
+      "substances": "",
+      "riskLevel": "",
+      "clinicalExplanation": "",
+      "recommendation": ""
+    }}
+  ],
+  "clinicalNotes": ""
+}}
+"""
     
     try:
+        # 1. Generate AI Response
         response = model.generate_content(prompt)
-        # Clean the response in case Gemini adds markdown ```json blocks
-        clean_text = response.text.replace('```json', '').replace('```', '').strip()
-        return json.loads(clean_text)
-    except Exception as e:
-        print(f"Error: {e}")
-        raise HTTPException(status_code=500, detail="AI Analysis failed")
+        
+        # 2. Clean Gemini's markdown if present
+        text_response = response.text.replace('```json', '').replace('```', '').strip()
+        ai_data = json.loads(text_response)
+        
+        # 3. Prepare for MongoDB
+        full_record = {
+            "doctorId": data.doctorId,
+            "doctorEmail": data.doctorEmail,
+            "patient_info": data.dict(),
+            "diagnosis_result": ai_data,
+            "timestamp": datetime.datetime.utcnow().isoformat()
+        }
+        
+        # 4. Save to MongoDB Atlas
+        try:
+            await records_collection.insert_one(full_record)
+            print("Successfully saved to MongoDB Atlas")
+        except Exception as db_err:
+            print(f"DATABASE ERROR: {db_err}")
+            pass 
+        
+        return ai_data
 
-# --- 2. Multilingual Chatbot Endpoint ---
+    except Exception as e:
+        print(f"CRITICAL ERROR IN ANALYZE: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Backend Error: {str(e)}")
+
+@app.get("/api/doctor/records")
+async def get_doctor_records(email: str = Query(None)):
+    query = {"doctorEmail": email} if email else {}
+    cursor = records_collection.find(query).sort("timestamp", -1)
+    records = await cursor.to_list(length=50)
+    for r in records:
+        r["_id"] = str(r["_id"])
+    return records
 
 @app.post("/api/common-chat")
 async def common_chat(data: ChatRequest):
@@ -94,21 +125,20 @@ async def common_chat(data: ChatRequest):
     target_lang = lang_names.get(data.language, "English")
 
     prompt = f"""
-    Role: You are 'PulseNet AI', a helpful medical assistant.
-    User Message: {data.message}
-    Constraint: You MUST reply only in {target_lang}. 
-    Context: Be empathetic and concise. If the user asks medical questions, give helpful health advice but remind them to consult a doctor.
-    """
+You are PulseNet AI, a healthcare-only virtual assistant. 
+Reply ONLY in {target_lang}.
+USER MESSAGE: {data.message}
 
+MEDICAL SAFETY RULES:
+- Provide general health info.
+- Do NOT diagnose or prescribe.
+- Remind the user to see a doctor.
+"""
     try:
         response = model.generate_content(prompt)
         return {"reply": response.text.strip()}
     except Exception as e:
-        print(f"--- DETAILED ERROR LOG ---")
-        print(f"Error Type: {type(e).__name__}")
-        print(f"Error Message: {str(e)}")
-        print(f"--------------------------")
-        return {"reply": f"Internal AI Error: {str(e)}"} # Show error in chat for debugging
+        return {"reply": f"Internal AI Error: {str(e)}"}
 
 if __name__ == "__main__":
     import uvicorn
