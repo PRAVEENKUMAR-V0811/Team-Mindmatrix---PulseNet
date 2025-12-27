@@ -1,5 +1,7 @@
 #  PulseNet — AI-Powered Medical Diagnosis & Clinical Decision Support System
 
+## Live URL Deployed : https://pulsenetai.vercel.app/
+
 PulseNet is an *AI-powered medical diagnosis and clinical decision support platform* designed to assist doctors and healthcare professionals in analyzing patient symptoms and vital signs to generate *probable diagnoses, confidence scores, treatment guidance, and referral recommendations*.
 
 The system is especially tailored for *primary healthcare centers, rural clinics, and low-resource medical environments*, where instant access to specialists may not be available.
